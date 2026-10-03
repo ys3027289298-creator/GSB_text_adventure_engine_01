@@ -21,6 +21,9 @@ ROOM_FILE = os.path.join(GAME_FOLDER, "rooms.json")
 ITEM_FILE = os.path.join(GAME_FOLDER, "items.json")
 CHARACTER_FILE = os.path.join(GAME_FOLDER, "characters.json")
 FLAG_FILE = os.path.join(GAME_FOLDER, "flags.json")
+SAVE_FILE = "savegame.json"
+SAVE_VERSION = 1
+START_ROOM = 1
 
 PROMPT = "\nWhat now? "
 #PROMPT = "\n>>> "
@@ -58,6 +61,10 @@ RESET = "\033[0;0m"
 # Game specific
 UNLOCKABLE = [(4, 'key', 'portal')]
 ENTERABLE = [(4, 'portal')]
+
+
+class SaveGameError(Exception):
+    """Raised when a save file is corrupted, incompatible, or unsafe to load."""
 
 
 def parse_input(input):
@@ -216,19 +223,49 @@ def initialize_flags():
 
 def get_room(id, rooms):
     """Change rooms by creating and returning a new room object"""
+    if id not in rooms:
+        raise KeyError("Unknown room id: " + str(id))
     room = rooms[id]
     return Room(id, room[0], room[1], room[2])
+
+
+def validate_map(rooms, start_id=START_ROOM):
+    """Validates map connectivity.
+
+    Raises ValueError if any exit points to a missing room or if any
+    room is unreachable from the start room, so the player can never
+    end up trapped by broken game data.
+    """
+    if start_id not in rooms:
+        raise ValueError("Start room " + str(start_id) + " does not exist.")
+    for room_id, room in rooms.items():
+        for direction, target in room[2].items():
+            if target not in rooms:
+                raise ValueError(
+                    "Room " + str(room_id) + " has exit '" + direction +
+                    "' leading to missing room " + str(target) + ".")
+    visited = set()
+    stack = [start_id]
+    while stack:
+        room_id = stack.pop()
+        if room_id in visited:
+            continue
+        visited.add(room_id)
+        stack.extend(rooms[room_id][2].values())
+    unreachable = sorted(set(rooms) - visited)
+    if unreachable:
+        raise ValueError("Unreachable rooms: " + str(unreachable) + ".")
 
 
 class Room():
     """A room (location) in the text adventure game"""
 
-    def __init__(self, id=0, name='A Room', description='An empty room', neighbors={}):
+    def __init__(self, id=0, name='A Room', description='An empty room', neighbors=None):
 
         self.id = id
         self.name = name
         self.description = description
-        self.neighbors = neighbors
+        self.neighbors = neighbors if neighbors is not None else {}
 
     def _neighbor(self, direction):
         if direction in self.neighbors:
@@ -275,6 +312,9 @@ class Game(cmd.Cmd):
         # Load and initialize rooms
         self.rooms = initialize_rooms()
 
+        # Refuse to start a game whose map could trap the player
+        validate_map(self.rooms, start_id=START_ROOM)
+
         # Load and initialize items
         self.items = initialize_items()
 
@@ -285,7 +325,7 @@ class Game(cmd.Cmd):
         self.flags = initialize_flags()
 
         # Get current room info
-        self.loc = get_room(1, self.rooms)
+        self.loc = get_room(START_ROOM, self.rooms)
 
         # Display location info
         self.look()
@@ -331,7 +371,7 @@ class Game(cmd.Cmd):
     def move(self, dir):
         """Moves player from location to location"""
         newroom = self.loc._neighbor(dir)
-        if newroom is None:
+        if newroom is None or newroom not in self.rooms:
             display_output("You can't go that way.")
         else:
             self.loc = get_room(newroom, self.rooms)
@@ -377,13 +417,14 @@ class Game(cmd.Cmd):
             display_output(MORE_SPECIFIC_MSG)
         else:
             if object_lower in self.items:
-                for key, value in self.items.items():
-                    if key == object_lower :
-                        if value[2] == self.loc.id:
-                            value[2] = 0
-                            display_output("You got the " + object + ".")
-                        elif value[2] == 0:
-                            display_output("You already have the " + object + ".")
+                value = self.items[object_lower]
+                if value[2] == self.loc.id:
+                    value[2] = 0
+                    display_output("You got the " + object + ".")
+                elif value[2] == 0:
+                    display_output("You already have the " + object + ".")
+                else:
+                    display_output("I don't see " + object + " here.")
             else:
                 if object_lower in self.characters:
                     display_output("You can't pick that up!")
@@ -399,13 +440,12 @@ class Game(cmd.Cmd):
             display_output(MORE_SPECIFIC_MSG)
         else:
             if object_lower in self.items:
-                for key, value in self.items.items():
-                    if key == object_lower:
-                        if value[2] == 0:
-                            value[2] = self.loc.id
-                            display_output("You dropped the " + object + ".")
-                        else:
-                            display_output("You don't have " + object + ".")
+                value = self.items[object_lower]
+                if value[2] == 0:
+                    value[2] = self.loc.id
+                    display_output("You dropped the " + object + ".")
+                else:
+                    display_output("You don't have " + object + ".")
             else:
                 display_output("You don't have " + object + ".")
 
@@ -455,15 +495,20 @@ class Game(cmd.Cmd):
         else:
             for u in UNLOCKABLE:
                 if u[0] == self.loc.id and object_lower == u[2]:
-                    for key, value in self.items.items():
-                        if key == 'key' and value[2] == 0:
-                            if self.flags[u[2]+'_unlocked'] == 'False':
-                                self.flags[u[2]+'_unlocked'] = 'True'
-                                display_output("You unlocked the " + u[2] + ".")
-                            else:
-                                display_output("The " + u[2] + " is already unlocked.")
+                    if self.flags[u[2] + '_unlocked'] == 'True':
+                        display_output("The " + u[2] + " is already unlocked.")
+                    elif self._has_item(u[1]):
+                        self.flags[u[2] + '_unlocked'] = 'True'
+                        display_output("You unlocked the " + u[2] + ".")
+                    else:
+                        display_output("You don't have anything to unlock it with.")
                 else:
                     display_output("You don't have anything to unlock it with.")
+
+
+    def _has_item(self, nickname):
+        """Returns True if the item with this nickname is in the inventory"""
+        return nickname in self.items and self.items[nickname][2] == 0
 
 
     def do_enter(self, args):
@@ -525,6 +570,109 @@ class Game(cmd.Cmd):
         """Leaves the game"""
         display_output(QUIT_MSG)
         return True
+
+
+    def serialize(self):
+        """Returns the current game state as a JSON-serializable dict"""
+        return {
+            'version': SAVE_VERSION,
+            'location': self.loc.id,
+            'items': {key: value[2] for key, value in self.items.items()},
+            'characters': {key: value[3] for key, value in self.characters.items()},
+            'flags': dict(self.flags),
+        }
+
+    def save_game(self, filepath=SAVE_FILE):
+        """Saves the current game state to a JSON file"""
+        with open(filepath, 'w') as fp:
+            json.dump(self.serialize(), fp, indent=4, sort_keys=True)
+
+    def load_game(self, filepath=SAVE_FILE):
+        """Loads game state from a JSON save file.
+
+        Raises SaveGameError if the file is corrupted, incompatible, or
+        would leave the player in an invalid state. On failure the
+        current game state is left untouched.
+        """
+        try:
+            with open(filepath) as fp:
+                data = json.load(fp)
+        except (OSError, ValueError) as e:
+            raise SaveGameError("Cannot load save file: " + str(e))
+        state = self._validate_save(data)
+        self.loc = get_room(state['location'], self.rooms)
+        for key, location in state['items'].items():
+            self.items[key][2] = location
+        for key, location in state['characters'].items():
+            self.characters[key][3] = location
+        self.flags.update(state['flags'])
+
+    def _validate_save(self, data):
+        """Validates save data and returns a normalized state dict.
+
+        Accepts the legacy unversioned save format (no 'version' key)
+        for backward compatibility.
+        """
+        if not isinstance(data, dict):
+            raise SaveGameError("Save data is not a JSON object.")
+        version = data.get('version', 0)
+        if not isinstance(version, int) or version < 0 or version > SAVE_VERSION:
+            raise SaveGameError("Unsupported save file version: " + str(version))
+        for field in ('location', 'items', 'flags'):
+            if field not in data:
+                raise SaveGameError("Save file is missing '" + field + "'.")
+        location = data['location']
+        if location not in self.rooms:
+            raise SaveGameError(
+                "Save file points to unknown room: " + str(location))
+        items = data['items']
+        if not isinstance(items, dict):
+            raise SaveGameError("Save file has invalid 'items' data.")
+        for key, item_location in items.items():
+            if key not in self.items:
+                raise SaveGameError("Save file has unknown item: " + str(key))
+            if item_location != 0 and item_location not in self.rooms:
+                raise SaveGameError(
+                    "Item " + str(key) + " is in unknown room: " +
+                    str(item_location))
+        characters = data.get('characters', {})
+        if not isinstance(characters, dict):
+            raise SaveGameError("Save file has invalid 'characters' data.")
+        for key, character_location in characters.items():
+            if key not in self.characters:
+                raise SaveGameError(
+                    "Save file has unknown character: " + str(key))
+            if character_location not in self.rooms:
+                raise SaveGameError(
+                    "Character " + str(key) + " is in unknown room: " +
+                    str(character_location))
+        flags = data['flags']
+        if not isinstance(flags, dict):
+            raise SaveGameError("Save file has invalid 'flags' data.")
+        for key in flags:
+            if key not in self.flags:
+                raise SaveGameError("Save file has unknown flag: " + str(key))
+        return {'location': location, 'items': items,
+                'characters': characters, 'flags': flags}
+
+    def do_save(self, args):
+        """Save the current game"""
+        filename = split_input(args) or SAVE_FILE
+        try:
+            self.save_game(filename)
+            display_output("Game saved to " + filename + ".")
+        except OSError as e:
+            display_output("Could not save game: " + str(e))
+
+    def do_load(self, args):
+        """Load a previously saved game"""
+        filename = split_input(args) or SAVE_FILE
+        try:
+            self.load_game(filename)
+        except SaveGameError as e:
+            display_output("Could not load game: " + str(e))
+        else:
+            self.look()
 
 
     def do_n(self, args):

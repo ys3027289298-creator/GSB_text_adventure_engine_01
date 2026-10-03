@@ -61,6 +61,24 @@ The built-in Python module [`cmd`](https://docs.python.org/3/library/cmd.html) i
 
 No modules outside of the standard Python library are required.
 
+### Saving and loading
+
+The `save` and `load` commands (optionally followed by a filename, defaulting
+to `savegame.json`) persist the player's location, item and character
+locations, and flags as versioned JSON. Legacy unversioned save files still
+load. Corrupted, incompatible, or unsafe saves (e.g. pointing at rooms that
+do not exist) are rejected with a `SaveGameError` and leave the current game
+untouched, so a load can never strand the player. The engine also validates
+map connectivity at startup and refuses to run a game whose map has
+unreachable rooms or dangling exits.
+
+### Tests
+
+Contract tests for the map, item, command, and save/load interfaces live in
+`test_text_adventure.py`:
+
+`python3 -m unittest test_text_adventure -v`
+
 Further development and instruction to come.
 
 ### Sources of inspiration and ideas came from:
