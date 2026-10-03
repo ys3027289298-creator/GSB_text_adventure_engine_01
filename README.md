@@ -61,6 +61,12 @@ The built-in Python module [`cmd`](https://docs.python.org/3/library/cmd.html) i
 
 No modules outside of the standard Python library are required.
 
+### Saving and loading
+
+Use `save [file]` and `load [file]` in game (default file: `savegame.json`). Save files are versioned JSON containing the current location, item locations and flags. Corrupted or unsafe saves (invalid JSON, unknown rooms, items placed in nonexistent rooms) are rejected with a clear message and never modify the running game. Saves written before the format was versioned still load.
+
+Run the contract tests with `python3 -m unittest test_text_adventure`.
+
 Further development and instruction to come.
 
 ### Sources of inspiration and ideas came from:

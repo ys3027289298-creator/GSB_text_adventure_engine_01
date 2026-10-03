@@ -31,9 +31,13 @@ UNKNOWN_MSG = "Sorry, but I don't understand."
 MORE_SPECIFIC_MSG = "You need to be more specific."
 NOT_HERE_MSG = "You can't do that here."
 QUIT_MSG = "Thanks for playing!\n"
+SAVE_MSG = "Game saved."
+LOAD_MSG = "Game loaded."
 FAST_TYPING = 500
 SLOW_TYPING = 200
 TEXT_WIDTH = 80
+SAVE_VERSION = 1
+DEFAULT_SAVE_FILE = "savegame.json"
 
 STOP_WORDS = []
 SYNONYMS = {'west': 'w',
@@ -58,6 +62,10 @@ RESET = "\033[0;0m"
 # Game specific
 UNLOCKABLE = [(4, 'key', 'portal')]
 ENTERABLE = [(4, 'portal')]
+
+
+class SaveGameError(Exception):
+    """Raised when a save file cannot be loaded safely."""
 
 
 def parse_input(input):
@@ -216,6 +224,8 @@ def initialize_flags():
 
 def get_room(id, rooms):
     """Change rooms by creating and returning a new room object"""
+    if id not in rooms:
+        raise KeyError("Unknown room id: " + str(id))
     room = rooms[id]
     return Room(id, room[0], room[1], room[2])
 
@@ -228,7 +238,7 @@ class Room():
         self.id = id
         self.name = name
         self.description = description
-        self.neighbors = neighbors
+        self.neighbors = dict(neighbors)
 
     def _neighbor(self, direction):
         if direction in self.neighbors:
@@ -328,10 +338,69 @@ class Game(cmd.Cmd):
         self.check_characters()
 
 
+    def save_game(self, filepath):
+        """Serializes current game state to a versioned JSON save file"""
+        state = {
+            'version': SAVE_VERSION,
+            'loc': self.loc.id,
+            'items': {key: value[2] for key, value in self.items.items()},
+            'flags': dict(self.flags),
+        }
+        with open(filepath, 'w') as fp:
+            json.dump(state, fp, indent=4)
+
+
+    def load_game(self, filepath):
+        """Loads game state from a save file.
+
+        Validates the save before touching live state: a corrupted or
+        unsafe save raises SaveGameError and leaves the current game
+        untouched, so the player is never stranded in a room that does
+        not exist. Saves written before the format was versioned (no
+        'version' field) are still accepted.
+        """
+        try:
+            with open(filepath) as fp:
+                state = json.load(fp)
+        except json.JSONDecodeError as e:
+            raise SaveGameError("Save file is not valid JSON: " + str(e))
+        if not isinstance(state, dict):
+            raise SaveGameError("Save file has an unexpected format.")
+
+        loc = state.get('loc')
+        if not isinstance(loc, int) or loc not in self.rooms:
+            raise SaveGameError("Save file points at an unknown location.")
+
+        saved_items = state.get('items', {})
+        if not isinstance(saved_items, dict):
+            raise SaveGameError("Save file has a malformed items section.")
+        for key, location in saved_items.items():
+            if key not in self.items:
+                raise SaveGameError("Save file mentions unknown item: " + str(key))
+            if not isinstance(location, int) or (location != 0 and location not in self.rooms):
+                raise SaveGameError("Save file places item '" + str(key) + "' nowhere reachable.")
+
+        saved_flags = state.get('flags', {})
+        if not isinstance(saved_flags, dict):
+            raise SaveGameError("Save file has a malformed flags section.")
+        for key, setting in saved_flags.items():
+            if key not in self.flags:
+                raise SaveGameError("Save file mentions unknown flag: " + str(key))
+            if setting not in ('True', 'False'):
+                raise SaveGameError("Save file has an invalid setting for flag: " + str(key))
+
+        # Everything validated; only now mutate live state.
+        self.loc = get_room(loc, self.rooms)
+        for key, location in saved_items.items():
+            self.items[key][2] = location
+        for key, setting in saved_flags.items():
+            self.flags[key] = setting
+
+
     def move(self, dir):
         """Moves player from location to location"""
         newroom = self.loc._neighbor(dir)
-        if newroom is None:
+        if newroom is None or newroom not in self.rooms:
             display_output("You can't go that way.")
         else:
             self.loc = get_room(newroom, self.rooms)
@@ -377,13 +446,14 @@ class Game(cmd.Cmd):
             display_output(MORE_SPECIFIC_MSG)
         else:
             if object_lower in self.items:
-                for key, value in self.items.items():
-                    if key == object_lower :
-                        if value[2] == self.loc.id:
-                            value[2] = 0
-                            display_output("You got the " + object + ".")
-                        elif value[2] == 0:
-                            display_output("You already have the " + object + ".")
+                value = self.items[object_lower]
+                if value[2] == self.loc.id:
+                    value[2] = 0
+                    display_output("You got the " + object + ".")
+                elif value[2] == 0:
+                    display_output("You already have the " + object + ".")
+                else:
+                    display_output("I don't see " + object + " here.")
             else:
                 if object_lower in self.characters:
                     display_output("You can't pick that up!")
@@ -525,6 +595,29 @@ class Game(cmd.Cmd):
         """Leaves the game"""
         display_output(QUIT_MSG)
         return True
+
+
+    def do_save(self, args):
+        """Save the game, optionally to a given file"""
+        filepath = args.strip() or DEFAULT_SAVE_FILE
+        try:
+            self.save_game(filepath)
+            display_output(SAVE_MSG)
+        except OSError as e:
+            display_output("Could not save the game: " + str(e))
+
+
+    def do_load(self, args):
+        """Load a saved game, optionally from a given file"""
+        filepath = args.strip() or DEFAULT_SAVE_FILE
+        try:
+            self.load_game(filepath)
+            display_output(LOAD_MSG)
+            self.look()
+        except SaveGameError as e:
+            display_output("Could not load the save file: " + str(e))
+        except OSError as e:
+            display_output("Could not load the save file: " + str(e))
 
 
     def do_n(self, args):
